@@ -1319,8 +1319,10 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(
             pi05=True,
             paligemma_variant="gemma_2b_lora",
+            # 发布的 checkpoint 仅在第一个 expert（PaliGemma）上带 LoRA；
+            # action expert 分支保存的是普通 gemma_300m 权重。
             action_expert_variant="gemma_300m_lora",
-            discrete_state_input=False,
+            discrete_state_input=True,
             # 数据中真实有效动作维度为 13，其余通过 PadStatesAndActions padding。
             effective_action_dim=13,
             tactile_type=TactileType.EXPERT_HIS_C_FUT,
@@ -1349,7 +1351,7 @@ _CONFIGS = [
         num_train_steps=30_000,
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
-            discrete_state_input=False,
+            discrete_state_input=True,
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
         ema_decay=None,
@@ -1362,7 +1364,7 @@ _CONFIGS = [
             pi05=True,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
-            discrete_state_input=False,
+            discrete_state_input=True,
             effective_action_dim=13,
             tactile_type=TactileType.EXPERT_HIS_C_FUT,
             tactile_dim=6,
@@ -1389,7 +1391,7 @@ _CONFIGS = [
         num_train_steps=50_000,
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
-            discrete_state_input=False,
+            discrete_state_input=True,
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
         ema_decay=None,

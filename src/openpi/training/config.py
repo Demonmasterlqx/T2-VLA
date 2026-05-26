@@ -1348,7 +1348,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
+        num_train_steps=50_000,
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
             discrete_state_input=True,
@@ -1373,7 +1373,7 @@ _CONFIGS = [
             tactile_loss_weight=TACTILE_LOSS_WEIGHT,
         ),
         data=TaberoTacImgDataConfig(
-            repo_id="xiangxin0923/yellow_cube",
+            repo_id="xiangxin0923/task_all",
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
@@ -1417,9 +1417,9 @@ _CONFIGS = [
             tactile_prefix_use_reference_frame=True,
             tactile_prefix_diff_from_reference=False,
             tactile_streams=("tactile_prefix",),
-            tactile_loss_weight=TACTILE_LOSS_WEIGHT,
+            tactile_loss_weight=0.01,
         ),
-        batch_size=32,
+        batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
             peak_lr=2.5e-5,
@@ -1469,9 +1469,9 @@ _CONFIGS = [
             tactile_prefix_use_reference_frame=False,
             tactile_prefix_diff_from_reference=True,
             tactile_streams=("tactile_prefix",),
-            tactile_loss_weight=TACTILE_LOSS_WEIGHT,
+            tactile_loss_weight=0.01,
         ),
-        batch_size=32,
+        batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
             peak_lr=2.5e-5,

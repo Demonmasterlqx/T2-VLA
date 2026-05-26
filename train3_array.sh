@@ -1,15 +1,22 @@
 #!/bin/bash
 #
-# 用 Slurm Job Array 并行跑 3 个实验（每个 array task 跑 1 个 config）
+# 用 Slurm Job Array 跑实验（每个 array task 跑 1 个 config）
 #
 # 用法：
+#   # 默认单任务：走 array 机制，只跑 CONFIGS[0]
 #   sbatch train3_array.sh
 #   RUN_TAG=run1 sbatch train3_array.sh
 #   OVERWRITE=0 sbatch train3_array.sh
-#   # 限制同时最多跑 1 个（等价于顺序，但仍是 3 个独立任务）
+#   # 跑单个指定 config（例如 CONFIGS[2]）
+#   sbatch --array=2-2 train3_array.sh
+#   # 跑多个 config
+#   sbatch --array=0-2 train3_array.sh
+#   # 限制同时最多跑 1 个（等价于顺序，但仍是多个独立 task）
 #   sbatch --array=0-2%1 train3_array.sh
 #
 # 说明：
+# - 统一只保留 array 机制，不再维护单独的“普通单任务脚本”逻辑。
+# - 默认 #SBATCH --array=0-0，因此直接 sbatch 也是单任务 array。
 # - job array 会创建多个“独立”任务：日志独立、失败互不影响、调度器按资源可用性并行调度。
 # - 每个任务跑 1 个 config，可并发执行。
 
@@ -18,6 +25,7 @@
 #SBATCH --partition=defq
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
+#SBATCH --array=0-0
 # 强制跑到指定节点（如需覆盖，也可以在 sbatch 时传 --nodelist=...）SBATCH --nodelist=h20-2
 #
 # 这里的 GPU 数是“每个 array task”的资源申请。
@@ -68,7 +76,7 @@ export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 STARTUP_STAGGER_SEC="${STARTUP_STAGGER_SEC:-20}"
 
 CONFIGS=(
-  "pi05_lora_tacimg_tabero"
+  "pi05_lora_tacimg_real"
 )
 
 TASK_ID="${SLURM_ARRAY_TASK_ID}"

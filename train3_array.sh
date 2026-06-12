@@ -76,7 +76,7 @@ export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 STARTUP_STAGGER_SEC="${STARTUP_STAGGER_SEC:-20}"
 
 CONFIGS=(
-  "pi05_lora_tacimg_real"
+  "pi05_lora_tacimg_tabero"
 )
 
 TASK_ID="${SLURM_ARRAY_TASK_ID}"

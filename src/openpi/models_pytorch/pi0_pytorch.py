@@ -1,6 +1,7 @@
 import logging
 import math
 
+import safetensors.torch
 import torch
 from torch import Tensor
 from torch import nn
@@ -9,6 +10,37 @@ import torch.nn.functional as F  # noqa: N812
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
+from openpi.models_pytorch.tactile_encoder_pytorch import TactileTCNEncoder
+
+_ACTION_EXPERT_OVERLAY_PREFIXES = (
+    "paligemma_with_expert.gemma_expert.",
+    "action_in_proj.",
+    "action_out_proj.",
+    "state_proj.",
+    "action_time_mlp",
+    "time_mlp_",
+    "tactile_prefix_encoder.",
+)
+_PALIGEMMA_VLM_OVERLAY_PREFIX = "paligemma_with_expert.paligemma."
+
+
+def _select_action_expert_overlay_keys(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
+    selected = {}
+    unexpected = []
+    for key, value in state_dict.items():
+        if key.startswith(_ACTION_EXPERT_OVERLAY_PREFIXES):
+            selected[key] = value
+        elif not key.startswith(_PALIGEMMA_VLM_OVERLAY_PREFIX):
+            unexpected.append(key)
+
+    if unexpected:
+        unexpected_preview = ", ".join(unexpected[:20])
+        if len(unexpected) > 20:
+            unexpected_preview += f", ... ({len(unexpected)} total)"
+        raise RuntimeError(f"Unexpected action expert overlay keys: {unexpected_preview}")
+    if not selected:
+        raise ValueError("Overlay contains no action expert keys to load.")
+    return selected
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -108,6 +140,8 @@ class PI0Pytorch(nn.Module):
             self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
+        self._init_tactile_prefix_encoder()
+
         torch.set_float32_matmul_precision("high")
         self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
 
@@ -122,6 +156,53 @@ class PI0Pytorch(nn.Module):
                 raise ValueError(msg)
         except ImportError:
             raise ValueError(msg) from None
+
+    def _init_tactile_prefix_encoder(self):
+        tactile_streams = tuple(getattr(self.config, "tactile_streams", ()) or ())
+        tactile_prefix_dim_in = getattr(self.config, "tactile_prefix_dim_in", None)
+        if "tactile_prefix" not in tactile_streams or not tactile_prefix_dim_in or tactile_prefix_dim_in <= 0:
+            self.tactile_prefix_encoder = None
+            return
+
+        if getattr(self.config, "tactile_prefix_encoder_type", None) != "tcn":
+            raise ValueError("Only tactile_prefix_encoder_type='tcn' is supported for Tabero PyTorch serving.")
+
+        history_len = getattr(self.config, "tactile_prefix_history", None)
+        has_reference_frame = getattr(self.config, "tactile_prefix_use_reference_frame", None)
+        diff_from_reference = getattr(self.config, "tactile_prefix_diff_from_reference", None)
+        if history_len is None:
+            raise ValueError("tactile_prefix_history is required for TCN tactile.")
+        if has_reference_frame is None:
+            raise ValueError("tactile_prefix_use_reference_frame is required for TCN tactile.")
+        if diff_from_reference is None:
+            raise ValueError("tactile_prefix_diff_from_reference is required for TCN tactile.")
+
+        steps = history_len + 1 if has_reference_frame else history_len
+        if tactile_prefix_dim_in % steps != 0:
+            raise ValueError(
+                "tactile_prefix_dim_in must be divisible by the effective history length; "
+                f"got dim={tactile_prefix_dim_in}, steps={steps}."
+            )
+
+        prefix_width = _gemma.get_config(self.config.paligemma_variant).width
+        self.tactile_prefix_encoder = TactileTCNEncoder(
+            input_dim=tactile_prefix_dim_in // steps,
+            hidden_dim=2 * prefix_width,
+            output_dim=prefix_width,
+            history_len=history_len,
+            has_reference_frame=has_reference_frame,
+            diff_from_reference=diff_from_reference,
+        )
+
+    def load_action_expert_overlay(self, path: str) -> None:
+        overlay_state = safetensors.torch.load_file(path, device="cpu")
+        overlay_state = _select_action_expert_overlay_keys(overlay_state)
+        incompatible_keys = self.load_state_dict(overlay_state, strict=False)
+        if incompatible_keys.unexpected_keys:
+            unexpected_preview = ", ".join(incompatible_keys.unexpected_keys[:20])
+            if len(incompatible_keys.unexpected_keys) > 20:
+                unexpected_preview += f", ... ({len(incompatible_keys.unexpected_keys)} total)"
+            raise RuntimeError(f"Unexpected action expert overlay keys: {unexpected_preview}")
 
     def gradient_checkpointing_enable(self):
         """Enable gradient checkpointing for memory optimization."""
@@ -167,6 +248,7 @@ class PI0Pytorch(nn.Module):
             observation.tokenized_prompt,
             observation.tokenized_prompt_mask,
             observation.state,
+            getattr(observation, "tactile_prefix", None),
         )
 
     def sample_noise(self, shape, device):
@@ -184,11 +266,9 @@ class PI0Pytorch(nn.Module):
         return time.to(dtype=torch.float32, device=device)
 
     def embed_prefix(
-        self, images, img_masks, lang_tokens, lang_masks
+        self, images, img_masks, lang_tokens, lang_masks, tactile_prefix=None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Embed images with SigLIP and language tokens with embedding layer to prepare
-        for PaliGemma transformer processing.
-        """
+        """Embed images, language, and optional Tabero tactile prefix tokens."""
         embs = []
         pad_masks = []
         att_masks = []
@@ -223,6 +303,21 @@ class PI0Pytorch(nn.Module):
         # full attention between image and language inputs
         num_lang_embs = lang_emb.shape[1]
         att_masks += [0] * num_lang_embs
+
+        if self.tactile_prefix_encoder is not None and tactile_prefix is not None:
+            tactile_prefix = tactile_prefix.to(
+                device=lang_emb.device,
+                dtype=self.tactile_prefix_encoder.out_proj.weight.dtype,
+            )
+
+            def tactile_embed_func(tactile):
+                return self.tactile_prefix_encoder(tactile)
+
+            tactile_emb = self._apply_checkpoint(tactile_embed_func, tactile_prefix)
+            tactile_emb = tactile_emb.to(dtype=lang_emb.dtype)[:, None, :]
+            embs.append(tactile_emb)
+            pad_masks.append(torch.ones(tactile_emb.shape[:2], dtype=torch.bool, device=tactile_emb.device))
+            att_masks += [0] * tactile_emb.shape[1]
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
@@ -315,7 +410,9 @@ class PI0Pytorch(nn.Module):
 
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
-        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
+        images, img_masks, lang_tokens, lang_masks, state, tactile_prefix = self._preprocess_observation(
+            observation, train=True
+        )
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -327,7 +424,9 @@ class PI0Pytorch(nn.Module):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, tactile_prefix
+        )
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
         if (
             self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
@@ -380,9 +479,13 @@ class PI0Pytorch(nn.Module):
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
 
-        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+        images, img_masks, lang_tokens, lang_masks, state, tactile_prefix = self._preprocess_observation(
+            observation, train=False
+        )
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks, tactile_prefix
+        )
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 

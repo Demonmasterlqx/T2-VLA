@@ -22,6 +22,7 @@ def create_trained_policy(
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     pytorch_device: str | None = None,
+    action_expert_merged_safetensors: str | None = None,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -37,6 +38,8 @@ def create_trained_policy(
             from the checkpoint directory.
         pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda", "cuda:0").
                       If None and is_pytorch=True, will use "cuda" if available, otherwise "cpu".
+        action_expert_merged_safetensors: Optional safetensors overlay containing merged action expert
+            weights for PyTorch checkpoints.
 
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
@@ -48,11 +51,15 @@ def create_trained_policy(
     # Check if this is a PyTorch model by looking for model.safetensors
     weight_path = os.path.join(checkpoint_dir, "model.safetensors")
     is_pytorch = os.path.exists(weight_path)
+    if action_expert_merged_safetensors is not None and not is_pytorch:
+        raise ValueError("action_expert_merged_safetensors is only supported for PyTorch checkpoints.")
 
     logging.info("Loading model...")
     if is_pytorch:
         model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
+        if action_expert_merged_safetensors is not None:
+            model.load_action_expert_overlay(action_expert_merged_safetensors)
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)

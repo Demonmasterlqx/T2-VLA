@@ -2,7 +2,6 @@ import dataclasses
 import enum
 import logging
 import socket
-
 import tyro
 
 from openpi.policies import policy as _policy
@@ -28,8 +27,6 @@ class Checkpoint:
     config: str
     # Checkpoint directory (e.g., "checkpoints/pi0_aloha_sim/exp/10000").
     dir: str
-    # Optional action expert merged safetensors overlay for PyTorch checkpoints.
-    action_expert_merged_safetensors: str | None = None
 
 
 @dataclasses.dataclass
@@ -95,7 +92,6 @@ def create_policy(args: Args) -> _policy.Policy:
                 _config.get_config(args.policy.config),
                 args.policy.dir,
                 default_prompt=args.default_prompt,
-                action_expert_merged_safetensors=args.policy.action_expert_merged_safetensors,
             )
         case Default():
             return create_default_policy(args.env, default_prompt=args.default_prompt)

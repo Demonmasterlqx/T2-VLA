@@ -1,7 +1,6 @@
 import logging
 import math
 
-import safetensors.torch
 import torch
 from torch import Tensor
 from torch import nn
@@ -11,36 +10,6 @@ import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
 from openpi.models_pytorch.tactile_encoder_pytorch import TactileTCNEncoder
-
-_ACTION_EXPERT_OVERLAY_PREFIXES = (
-    "paligemma_with_expert.gemma_expert.",
-    "action_in_proj.",
-    "action_out_proj.",
-    "state_proj.",
-    "action_time_mlp",
-    "time_mlp_",
-    "tactile_prefix_encoder.",
-)
-_PALIGEMMA_VLM_OVERLAY_PREFIX = "paligemma_with_expert.paligemma."
-
-
-def _select_action_expert_overlay_keys(state_dict: dict[str, Tensor]) -> dict[str, Tensor]:
-    selected = {}
-    unexpected = []
-    for key, value in state_dict.items():
-        if key.startswith(_ACTION_EXPERT_OVERLAY_PREFIXES):
-            selected[key] = value
-        elif not key.startswith(_PALIGEMMA_VLM_OVERLAY_PREFIX):
-            unexpected.append(key)
-
-    if unexpected:
-        unexpected_preview = ", ".join(unexpected[:20])
-        if len(unexpected) > 20:
-            unexpected_preview += f", ... ({len(unexpected)} total)"
-        raise RuntimeError(f"Unexpected action expert overlay keys: {unexpected_preview}")
-    if not selected:
-        raise ValueError("Overlay contains no action expert keys to load.")
-    return selected
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -193,16 +162,6 @@ class PI0Pytorch(nn.Module):
             has_reference_frame=has_reference_frame,
             diff_from_reference=diff_from_reference,
         )
-
-    def load_action_expert_overlay(self, path: str) -> None:
-        overlay_state = safetensors.torch.load_file(path, device="cpu")
-        overlay_state = _select_action_expert_overlay_keys(overlay_state)
-        incompatible_keys = self.load_state_dict(overlay_state, strict=False)
-        if incompatible_keys.unexpected_keys:
-            unexpected_preview = ", ".join(incompatible_keys.unexpected_keys[:20])
-            if len(incompatible_keys.unexpected_keys) > 20:
-                unexpected_preview += f", ... ({len(incompatible_keys.unexpected_keys)} total)"
-            raise RuntimeError(f"Unexpected action expert overlay keys: {unexpected_preview}")
 
     def gradient_checkpointing_enable(self):
         """Enable gradient checkpointing for memory optimization."""

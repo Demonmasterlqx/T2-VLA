@@ -2,6 +2,7 @@ import dataclasses
 import enum
 import logging
 import socket
+
 import tyro
 
 from openpi.policies import policy as _policy
@@ -50,6 +51,9 @@ class Args:
     # Record the policy's behavior for debugging.
     record: bool = False
 
+    # Optional Tabero RLT bundle exported from RLinf Stage 1/2 checkpoints.
+    rlt_bundle: str | None = None
+
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
 
@@ -92,8 +96,11 @@ def create_policy(args: Args) -> _policy.Policy:
                 _config.get_config(args.policy.config),
                 args.policy.dir,
                 default_prompt=args.default_prompt,
+                rlt_bundle_path=args.rlt_bundle,
             )
         case Default():
+            if args.rlt_bundle is not None:
+                raise ValueError("--rlt-bundle requires an explicit checkpoint policy.")
             return create_default_policy(args.env, default_prompt=args.default_prompt)
 
 

@@ -7,6 +7,7 @@ import jax.numpy as jnp
 
 import openpi.models.model as _model
 import openpi.policies.policy as _policy
+import openpi.policies.tabero_rlt_policy as _tabero_rlt_policy
 import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
@@ -22,6 +23,7 @@ def create_trained_policy(
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     pytorch_device: str | None = None,
+    rlt_bundle_path: pathlib.Path | str | None = None,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -37,6 +39,8 @@ def create_trained_policy(
             from the checkpoint directory.
         pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda", "cuda:0").
                       If None and is_pytorch=True, will use "cuda" if available, otherwise "cpu".
+        rlt_bundle_path: Optional exported Tabero RLT bundle. PyTorch PI0 is used as the
+            frozen reference model and its normalized actions are replaced by the RLT actor.
 
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
@@ -54,6 +58,8 @@ def create_trained_policy(
         model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     else:
+        if rlt_bundle_path is not None:
+            raise ValueError("Tabero RLT bundle serving requires a PyTorch checkpoint.")
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
@@ -62,6 +68,16 @@ def create_trained_policy(
         if data_config.asset_id is None:
             raise ValueError("Asset id is required to load norm stats.")
         norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+
+    if is_pytorch and rlt_bundle_path is not None:
+        model = _tabero_rlt_policy.TaberoRLTPolicyModel.from_bundle(
+            model,
+            rlt_bundle_path,
+            base_model_path=checkpoint_dir,
+            base_config_name=train_config.name,
+            norm_asset_id=data_config.asset_id,
+            use_quantile_norm=data_config.use_quantile_norm,
+        )
 
     # NOTE:
     # Policy.infer() only returns {"state", "actions"} (plus timing). Some training setups also

@@ -65,7 +65,7 @@ class Policy(BasePolicy):
             self._rng = rng or jax.random.key(0)
 
     @override
-    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+    def infer(self, obs: dict, *, noise: np.ndarray | torch.Tensor | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
@@ -81,7 +81,15 @@ class Policy(BasePolicy):
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
         if noise is not None:
-            noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
+            if self._is_pytorch_model:
+                if isinstance(noise, torch.Tensor):
+                    noise = noise.to(self._pytorch_device)
+                else:
+                    noise = torch.from_numpy(noise).to(self._pytorch_device)
+            else:
+                if isinstance(noise, torch.Tensor):
+                    raise TypeError("torch.Tensor noise is not supported for JAX policies; pass a NumPy array instead.")
+                noise = jnp.asarray(noise)
 
             if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)

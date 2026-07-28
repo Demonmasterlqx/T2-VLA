@@ -54,6 +54,9 @@ class Args:
     # Optional Tabero RLT bundle exported from RLinf Stage 1/2 checkpoints.
     rlt_bundle: str | None = None
 
+    # Optional final Tabero DSRL-SAC actor bundle exported from RLinf.
+    dsrl_bundle: str | None = None
+
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
 
@@ -90,6 +93,8 @@ def create_default_policy(env: EnvMode, *, default_prompt: str | None = None) ->
 
 def create_policy(args: Args) -> _policy.Policy:
     """Create a policy from the given arguments."""
+    if args.rlt_bundle is not None and args.dsrl_bundle is not None:
+        raise ValueError("--rlt-bundle and --dsrl-bundle are mutually exclusive.")
     match args.policy:
         case Checkpoint():
             return _policy_config.create_trained_policy(
@@ -97,10 +102,11 @@ def create_policy(args: Args) -> _policy.Policy:
                 args.policy.dir,
                 default_prompt=args.default_prompt,
                 rlt_bundle_path=args.rlt_bundle,
+                dsrl_bundle_path=args.dsrl_bundle,
             )
         case Default():
-            if args.rlt_bundle is not None:
-                raise ValueError("--rlt-bundle requires an explicit checkpoint policy.")
+            if args.rlt_bundle is not None or args.dsrl_bundle is not None:
+                raise ValueError("--rlt-bundle/--dsrl-bundle requires explicit checkpoint policy.")
             return create_default_policy(args.env, default_prompt=args.default_prompt)
 
 

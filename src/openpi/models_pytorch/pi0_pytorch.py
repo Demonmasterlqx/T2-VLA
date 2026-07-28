@@ -219,6 +219,9 @@ class PI0Pytorch(nn.Module):
             device=device,
         )
 
+    def _align_inference_noise(self, noise, device):
+        return noise.to(device=device, dtype=self.action_in_proj.weight.dtype)
+
     def sample_time(self, bsize, device):
         time_beta = sample_beta(1.5, 1.0, bsize, device)
         time = time_beta * 0.999 + 0.001
@@ -437,6 +440,8 @@ class PI0Pytorch(nn.Module):
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
+        else:
+            noise = self._align_inference_noise(noise, device)
 
         images, img_masks, lang_tokens, lang_masks, state, tactile_prefix = self._preprocess_observation(
             observation, train=False

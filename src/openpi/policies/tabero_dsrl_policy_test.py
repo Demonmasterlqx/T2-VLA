@@ -1,9 +1,12 @@
+import builtins
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -339,6 +342,109 @@ def test_bundle_rejects_actor_hash_mismatch(bundle_copy):
 
     with pytest.raises(ValueError, match="actor.*SHA-256 mismatch"):
         tabero_dsrl_policy.TaberoDSRLBundle.load(bundle_path, base_checkpoint_dir=base_path)
+
+
+def test_bundle_actor_load_is_bound_to_captured_hashed_bytes(bundle_copy, monkeypatch):
+    bundle_path, base_path = bundle_copy
+    actor_path = bundle_path / "dsrl_actor.safetensors"
+    replacement_path = bundle_path / ".replacement_actor"
+    original_backup = bundle_path / ".original_actor"
+    state = load_file(actor_path)
+    save_file({key: torch.ones_like(value) for key, value in state.items()}, replacement_path)
+
+    def during_actor_swap(callback):
+        os.replace(actor_path, original_backup)
+        os.replace(replacement_path, actor_path)
+        try:
+            return callback()
+        finally:
+            os.replace(actor_path, replacement_path)
+            os.replace(original_backup, actor_path)
+
+    real_load_file = getattr(tabero_dsrl_policy, "load_file", None)
+    if real_load_file is not None:
+
+        def aba_load_file(*args, **kwargs):
+            return during_actor_swap(lambda: real_load_file(*args, **kwargs))
+
+        monkeypatch.setattr(tabero_dsrl_policy, "load_file", aba_load_file)
+    if hasattr(tabero_dsrl_policy, "load"):
+        real_load = tabero_dsrl_policy.load
+
+        def aba_load(*args, **kwargs):
+            return during_actor_swap(lambda: real_load(*args, **kwargs))
+
+        monkeypatch.setattr(tabero_dsrl_policy, "load", aba_load)
+
+    bundle = tabero_dsrl_policy.TaberoDSRLBundle.load(bundle_path, base_checkpoint_dir=base_path)
+
+    assert all(torch.count_nonzero(tensor).item() == 0 for tensor in bundle.actor_state.values())
+    assert _sha256(actor_path) == bundle.manifest.actor_weights_sha256
+
+
+def test_bundle_manifest_parse_and_audit_hash_use_same_captured_bytes(bundle_copy, monkeypatch):
+    bundle_path, base_path = bundle_copy
+    manifest_path = bundle_path / "manifest.json"
+    replacement_path = bundle_path / ".replacement_manifest"
+    original_backup = bundle_path / ".original_manifest"
+    replacement = json.loads(manifest_path.read_text())
+    replacement["source_git_commit"] = "replacement"
+    _write_json(replacement_path, replacement)
+    real_parse_json_object = tabero_dsrl_policy._parse_json_object  # noqa: SLF001
+    swaps = 0
+
+    def aba_parse_json_object(content, path, label):
+        nonlocal swaps
+        if path != manifest_path:
+            return real_parse_json_object(content, path, label)
+        swaps += 1
+        os.replace(manifest_path, original_backup)
+        os.replace(replacement_path, manifest_path)
+        try:
+            return real_parse_json_object(content, path, label)
+        finally:
+            os.replace(manifest_path, replacement_path)
+            os.replace(original_backup, manifest_path)
+
+    monkeypatch.setattr(tabero_dsrl_policy, "_parse_json_object", aba_parse_json_object)
+
+    bundle = tabero_dsrl_policy.TaberoDSRLBundle.load(bundle_path, base_checkpoint_dir=base_path)
+
+    assert swaps == 1
+    assert bundle.manifest.values["source_git_commit"] == "deadbeef"
+
+
+def test_bundle_rejects_failed_audit_even_during_passed_audit_aba(bundle_copy, monkeypatch):
+    bundle_path, base_path = bundle_copy
+    audit_path = bundle_path / "artifact_audit.json"
+    replacement_path = bundle_path / ".replacement_audit"
+    original_backup = bundle_path / ".original_audit"
+    passed_audit = json.loads(audit_path.read_text())
+    _write_json(replacement_path, passed_audit)
+    failed_audit = dict(passed_audit)
+    failed_audit["status"] = "failed"
+    _write_json(audit_path, failed_audit)
+    real_parse_json_object = tabero_dsrl_policy._parse_json_object  # noqa: SLF001
+    swaps = 0
+
+    def aba_parse_json_object(content, path, label):
+        nonlocal swaps
+        if path != audit_path:
+            return real_parse_json_object(content, path, label)
+        swaps += 1
+        os.replace(audit_path, original_backup)
+        os.replace(replacement_path, audit_path)
+        try:
+            return real_parse_json_object(content, path, label)
+        finally:
+            os.replace(audit_path, replacement_path)
+            os.replace(original_backup, audit_path)
+
+    monkeypatch.setattr(tabero_dsrl_policy, "_parse_json_object", aba_parse_json_object)
+
+    with pytest.raises(ValueError, match="audit status.*passed"):
+        tabero_dsrl_policy.TaberoDSRLBundle.load(bundle_path, base_checkpoint_dir=base_path)
+    assert swaps == 1
 
 
 def test_bundle_rejects_more_than_one_actor_safetensors(bundle_copy):
@@ -693,7 +799,134 @@ def test_create_trained_policy_wraps_normal_pytorch_policy_with_dsrl_actor(tmp_p
     assert isinstance(result, tabero_dsrl_policy.TaberoDSRLPolicy)
     assert result._base_policy._model is loaded_model  # noqa: SLF001
     assert result._actor is actor  # noqa: SLF001
-    assert calls == [(tmp_path / "dsrl", {"base_checkpoint_dir": tmp_path, "device": "cpu"})]
+    assert calls == [
+        (
+            tmp_path / "dsrl",
+            {
+                "base_checkpoint_dir": tmp_path,
+                "base_model_sha256": hashlib.sha256(b"").hexdigest(),
+                "device": "cpu",
+            },
+        )
+    ]
+
+
+def test_policy_config_import_does_not_require_fcntl():
+    script = """
+import builtins
+
+real_import = builtins.__import__
+
+def import_without_fcntl(name, *args, **kwargs):
+    if name == "fcntl":
+        raise ImportError("simulated missing fcntl")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = import_without_fcntl
+import openpi.policies.policy_config
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_stable_dsrl_checkpoint_reports_missing_fcntl(tmp_path, monkeypatch):
+    weight_path = tmp_path / "model.safetensors"
+    weight_path.touch()
+    real_import = builtins.__import__
+
+    def import_without_fcntl(name, *args, **kwargs):
+        if name == "fcntl":
+            raise ImportError("simulated missing fcntl")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_fcntl)
+
+    with (
+        pytest.raises(ValueError, match="requires fcntl"),
+        policy_config._stable_dsrl_checkpoint(weight_path),  # noqa: SLF001
+    ):
+        pass
+
+
+def test_create_trained_policy_loads_dsrl_base_from_stable_fd_and_rejects_path_swap(tmp_path, monkeypatch):
+    weight_path = tmp_path / "model.safetensors"
+    original_bytes = b"original checkpoint"
+    replacement_bytes = b"replacement checkpoint"
+    weight_path.write_bytes(original_bytes)
+    replacement_path = tmp_path / "replacement.safetensors"
+    replacement_path.write_bytes(replacement_bytes)
+    original_backup = tmp_path / "original.safetensors"
+    loaded_model = _FakeLoadedPI0()
+    train_config = _fake_train_config(tmp_path, loaded_model)
+    observed = []
+
+    def load_pytorch(train_config, path):
+        del train_config
+        os.replace(weight_path, original_backup)
+        os.replace(replacement_path, weight_path)
+        observed.append(Path(path).read_bytes())
+        return loaded_model
+
+    train_config.model.load_pytorch = load_pytorch
+    monkeypatch.setattr(
+        tabero_dsrl_policy.TaberoDSRLActor,
+        "from_bundle",
+        classmethod(lambda cls, *args, **kwargs: SimpleNamespace(noise=lambda obs: None)),
+    )
+
+    with pytest.raises(ValueError, match="base checkpoint changed during load"):
+        policy_config.create_trained_policy(
+            train_config,
+            tmp_path,
+            norm_stats={},
+            pytorch_device="cpu",
+            dsrl_bundle_path="dsrl",
+        )
+
+    assert observed == [original_bytes]
+
+
+def test_create_trained_policy_detects_in_place_base_checkpoint_aba(tmp_path, monkeypatch):
+    weight_path = tmp_path / "model.safetensors"
+    original_bytes = b"original checkpoint"
+    weight_path.write_bytes(original_bytes)
+    loaded_model = _FakeLoadedPI0()
+    train_config = _fake_train_config(tmp_path, loaded_model)
+
+    def load_pytorch(train_config, path):
+        del train_config
+        assert Path(path).read_bytes() == original_bytes
+        weight_path.write_bytes(b"temporary replacement checkpoint")
+        weight_path.write_bytes(original_bytes)
+        return loaded_model
+
+    train_config.model.load_pytorch = load_pytorch
+    monkeypatch.setattr(
+        policy_config,
+        "_checkpoint_stat_fingerprint",
+        lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, 0, 0),
+    )
+    monkeypatch.setattr(
+        tabero_dsrl_policy.TaberoDSRLActor,
+        "from_bundle",
+        classmethod(lambda cls, *args, **kwargs: SimpleNamespace(noise=lambda obs: None)),
+    )
+
+    with pytest.raises(ValueError, match="base checkpoint changed during load"):
+        policy_config.create_trained_policy(
+            train_config,
+            tmp_path,
+            norm_stats={},
+            pytorch_device="cpu",
+            dsrl_bundle_path="dsrl",
+        )
 
 
 def test_create_trained_policy_rejects_rlt_and_dsrl_together(tmp_path, monkeypatch):

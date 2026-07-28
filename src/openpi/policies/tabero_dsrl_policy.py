@@ -10,7 +10,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from safetensors.torch import load_file
+from safetensors.torch import load
 import torch
 from torch import nn
 import torch.nn.functional as F  # noqa: N812
@@ -137,6 +137,25 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _capture_artifact(path: Path, label: str) -> tuple[bytes, str]:
+    try:
+        content = path.read_bytes()
+    except OSError as error:
+        raise ValueError(f"Tabero DSRL {label} could not be captured: {path}") from error
+    return content, hashlib.sha256(content).hexdigest()
+
+
+def _require_artifact_unchanged(path: Path, expected_hash: str, label: str) -> None:
+    try:
+        actual_hash = _sha256(path)
+    except OSError as error:
+        raise ValueError(f"Tabero DSRL {label} changed during bundle load: {path}") from error
+    if actual_hash != expected_hash:
+        raise ValueError(
+            f"Tabero DSRL {label} changed during bundle load: expected {expected_hash}, got {actual_hash}."
+        )
+
+
 def _require_sha256(value: Any, label: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{label} must be a SHA-256 hex digest.")
@@ -146,12 +165,10 @@ def _require_sha256(value: Any, label: str) -> str:
     return normalized
 
 
-def _read_json_object(path: Path, label: str) -> dict[str, Any]:
-    if not path.is_file():
-        raise FileNotFoundError(f"Tabero DSRL {label} not found: {path}")
+def _parse_json_object(content: bytes, path: Path, label: str) -> dict[str, Any]:
     try:
-        values = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
+        values = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"Tabero DSRL {label} is not valid JSON: {path}") from error
     if not isinstance(values, dict):
         raise ValueError(f"Tabero DSRL {label} must be a JSON object.")
@@ -362,12 +379,14 @@ class TaberoDSRLBundle:
         path: str | Path,
         *,
         base_checkpoint_dir: str | Path,
+        base_model_sha256: str | None = None,
     ) -> TaberoDSRLBundle:
         root = Path(path).expanduser()
         if not root.is_dir():
             raise FileNotFoundError(f"Tabero DSRL bundle directory not found: {root}")
         manifest_path = root / "manifest.json"
-        manifest_values = _read_json_object(manifest_path, "manifest")
+        manifest_content, manifest_hash = _capture_artifact(manifest_path, "manifest")
+        manifest_values = _parse_json_object(manifest_content, manifest_path, "manifest")
         manifest = TaberoDSRLManifest.from_dict(manifest_values)
 
         base_dir = Path(base_checkpoint_dir).expanduser()
@@ -376,7 +395,11 @@ class TaberoDSRLBundle:
         base_weights = base_dir / "model.safetensors"
         if not base_weights.is_file():
             raise FileNotFoundError(f"Tabero DSRL base checkpoint model.safetensors not found: {base_weights}")
-        actual_base_hash = _sha256(base_weights)
+        actual_base_hash = (
+            _sha256(base_weights)
+            if base_model_sha256 is None
+            else _require_sha256(base_model_sha256, "base_model_sha256")
+        )
         if actual_base_hash != manifest.base_model_sha256:
             raise ValueError(
                 "Tabero DSRL base checkpoint SHA-256 mismatch: "
@@ -392,7 +415,7 @@ class TaberoDSRLBundle:
             )
         if not actor_path.is_file():
             raise FileNotFoundError(f"Tabero DSRL actor weights not found: {actor_path}")
-        actual_actor_hash = _sha256(actor_path)
+        actor_content, actual_actor_hash = _capture_artifact(actor_path, "actor weights")
         if actual_actor_hash != manifest.actor_weights_sha256:
             raise ValueError(
                 "Tabero DSRL actor weights SHA-256 mismatch: "
@@ -400,7 +423,8 @@ class TaberoDSRLBundle:
             )
 
         audit_path = _bundle_filename(root, manifest.artifact_audit, "artifact_audit")
-        audit = _read_json_object(audit_path, "artifact audit")
+        audit_content, audit_hash = _capture_artifact(audit_path, "artifact audit")
+        audit = _parse_json_object(audit_content, audit_path, "artifact audit")
         actual_audit_keys = set(audit)
         if actual_audit_keys != DSRL_ARTIFACT_AUDIT_KEYS_V1:
             raise ValueError(
@@ -423,7 +447,7 @@ class TaberoDSRLBundle:
             "source_checkpoint_sha256": manifest.source_checkpoint_sha256,
             "base_model_sha256": manifest.base_model_sha256,
             "actor_weights_sha256": manifest.actor_weights_sha256,
-            "manifest_sha256": _sha256(manifest_path),
+            "manifest_sha256": manifest_hash,
         }
         for key, expected in audit_matches.items():
             if audit.get(key) != expected:
@@ -442,10 +466,14 @@ class TaberoDSRLBundle:
             raise ValueError("Tabero DSRL artifact audit checks must all be true.")
 
         try:
-            actor_state = load_file(actor_path, device="cpu")
+            actor_state = load(actor_content)
         except Exception as error:
             raise ValueError(f"Tabero DSRL actor weights could not be loaded: {actor_path}") from error
         _validate_actor_state(actor_state)
+        _require_artifact_unchanged(manifest_path, manifest_hash, "manifest")
+        _require_artifact_unchanged(audit_path, audit_hash, "artifact audit")
+        _require_artifact_unchanged(actor_path, actual_actor_hash, "actor weights")
+        _require_artifact_unchanged(base_weights, actual_base_hash, "base checkpoint")
         return cls(root=root, manifest=manifest, actor_state=MappingProxyType(actor_state))
 
     def build_actor(self, device: str | torch.device = "cpu") -> TaberoDSRLActor:
@@ -557,11 +585,13 @@ class TaberoDSRLActor(nn.Module):
         bundle_path: str | Path,
         *,
         base_checkpoint_dir: str | Path,
+        base_model_sha256: str | None = None,
         device: str | torch.device = "cpu",
     ) -> TaberoDSRLActor:
         return TaberoDSRLBundle.load(
             bundle_path,
             base_checkpoint_dir=base_checkpoint_dir,
+            base_model_sha256=base_model_sha256,
         ).build_actor(device)
 
     @property

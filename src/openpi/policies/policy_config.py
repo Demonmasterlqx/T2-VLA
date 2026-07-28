@@ -1,3 +1,6 @@
+import contextlib
+import ctypes
+import hashlib
 import logging
 import os
 import pathlib
@@ -13,6 +16,135 @@ import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
 import openpi.transforms as transforms
+
+
+class _InotifyCheckpointWatch:
+    _CHANGE_MASK = 0x00000002 | 0x00000004 | 0x00000008 | 0x00000400 | 0x00000800
+
+    def __init__(self, stable_path: str):
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            inotify_init1 = libc.inotify_init1
+            inotify_add_watch = libc.inotify_add_watch
+        except AttributeError as error:
+            raise ValueError("Tabero DSRL stable checkpoint loading requires Linux inotify.") from error
+        inotify_init1.argtypes = [ctypes.c_int]
+        inotify_init1.restype = ctypes.c_int
+        inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        inotify_add_watch.restype = ctypes.c_int
+
+        self._fd = inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if self._fd < 0:
+            error_number = ctypes.get_errno()
+            raise ValueError(
+                f"Tabero DSRL stable checkpoint inotify initialization failed: {os.strerror(error_number)}."
+            )
+        watch_descriptor = inotify_add_watch(self._fd, os.fsencode(stable_path), self._CHANGE_MASK)
+        if watch_descriptor < 0:
+            error_number = ctypes.get_errno()
+            os.close(self._fd)
+            self._fd = -1
+            raise ValueError(f"Tabero DSRL stable checkpoint inotify watch failed: {os.strerror(error_number)}.")
+
+    def drain_changed(self) -> bool:
+        changed = False
+        while True:
+            try:
+                events = os.read(self._fd, 64 * 1024)
+            except BlockingIOError:
+                return changed
+            except OSError as error:
+                raise ValueError("Tabero DSRL stable checkpoint inotify read failed.") from error
+            if not events:
+                return changed
+            changed = True
+
+    def close(self) -> None:
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
+
+
+def _checkpoint_stat_fingerprint(stat: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_ctime_ns,
+        stat.st_mtime_ns,
+    )
+
+
+def _sha256_fd(fd: int, size: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while offset < size:
+        chunk = os.pread(fd, min(8 * 1024 * 1024, size - offset), offset)
+        if not chunk:
+            raise ValueError("Tabero DSRL base checkpoint changed while it was being hashed.")
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
+
+
+@contextlib.contextmanager
+def _stable_dsrl_checkpoint(path: str | pathlib.Path):
+    try:
+        import fcntl
+    except ImportError as error:
+        raise ValueError("Tabero DSRL stable checkpoint loading requires fcntl.") from error
+
+    checkpoint_path = pathlib.Path(path)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(checkpoint_path, flags)
+    except OSError as error:
+        raise ValueError(f"Tabero DSRL base checkpoint could not be opened: {checkpoint_path}") from error
+    watch = None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        proc_path = f"/proc/self/fd/{fd}"
+        if not os.path.isfile(proc_path):
+            raise ValueError(f"Tabero DSRL stable checkpoint fd is unavailable: {proc_path}")
+        watch = _InotifyCheckpointWatch(proc_path)
+        before = os.fstat(fd)
+        before_fingerprint = _checkpoint_stat_fingerprint(before)
+        before_hash = _sha256_fd(fd, before.st_size)
+        if watch.drain_changed():
+            raise ValueError("Tabero DSRL base checkpoint changed during load.")
+        yield proc_path, before_hash
+
+        if watch.drain_changed():
+            raise ValueError("Tabero DSRL base checkpoint changed during load.")
+        after = os.fstat(fd)
+        after_hash = _sha256_fd(fd, after.st_size)
+        if watch.drain_changed():
+            raise ValueError("Tabero DSRL base checkpoint changed during load.")
+        if _checkpoint_stat_fingerprint(after) != before_fingerprint or after_hash != before_hash:
+            raise ValueError("Tabero DSRL base checkpoint changed during load.")
+
+        try:
+            path_fd = os.open(checkpoint_path, flags)
+        except OSError as error:
+            raise ValueError("Tabero DSRL base checkpoint changed during load.") from error
+        try:
+            path_stat = os.fstat(path_fd)
+            path_hash = _sha256_fd(path_fd, path_stat.st_size)
+        finally:
+            os.close(path_fd)
+        if watch.drain_changed():
+            raise ValueError("Tabero DSRL base checkpoint changed during load.")
+        if (path_stat.st_dev, path_stat.st_ino) != (before.st_dev, before.st_ino) or path_hash != before_hash:
+            raise ValueError("Tabero DSRL base checkpoint changed during load.")
+    finally:
+        try:
+            if watch is not None:
+                watch.close()
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 def create_trained_policy(
@@ -69,8 +201,13 @@ def create_trained_policy(
         )
 
     logging.info("Loading model...")
+    dsrl_base_model_sha256 = None
     if is_pytorch:
-        model = train_config.model.load_pytorch(train_config, weight_path)
+        if dsrl_bundle_path is not None:
+            with _stable_dsrl_checkpoint(weight_path) as (stable_weight_path, dsrl_base_model_sha256):
+                model = train_config.model.load_pytorch(train_config, stable_weight_path)
+        else:
+            model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
@@ -134,6 +271,7 @@ def create_trained_policy(
         actor = _tabero_dsrl_policy.TaberoDSRLActor.from_bundle(
             dsrl_bundle_path,
             base_checkpoint_dir=checkpoint_dir,
+            base_model_sha256=dsrl_base_model_sha256,
             device=pytorch_device,
         )
         return _tabero_dsrl_policy.TaberoDSRLPolicy(base_policy, actor)

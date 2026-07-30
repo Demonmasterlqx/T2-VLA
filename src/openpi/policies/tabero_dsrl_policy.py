@@ -131,6 +131,12 @@ DSRL_TRAINING_IDENTITIES_V1 = frozenset(
     {
         (
             0,
+            60,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task0_firm_8gpu_60step",
+            True,
+        ),
+        (
+            0,
             50,
             "isaaclab_pi0_dsrl_tacfield_tabero_task0_firm_8gpu_50step",
             True,

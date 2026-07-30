@@ -328,6 +328,26 @@ def test_bundle_loads_allowlisted_task0_selected_step10_profile(tmp_path):
     assert bundle.manifest.is_final is False
 
 
+def test_bundle_loads_allowlisted_task0_final_60step_profile(tmp_path):
+    bundle_path, base_path = _write_bundle(
+        tmp_path,
+        task_id=0,
+        global_step=60,
+        training_config=(
+            "isaaclab_pi0_dsrl_tacfield_tabero_task0_firm_8gpu_60step"
+        ),
+    )
+
+    bundle = tabero_dsrl_policy.TaberoDSRLBundle.load(
+        bundle_path,
+        base_checkpoint_dir=base_path,
+    )
+
+    assert bundle.manifest.task_id == 0
+    assert bundle.manifest.global_step == 60
+    assert bundle.manifest.is_final is True
+
+
 @pytest.mark.parametrize(
     ("task_id", "global_step", "training_config", "is_final"),
     [

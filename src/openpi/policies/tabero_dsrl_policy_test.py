@@ -101,6 +101,7 @@ def _write_bundle(
     task_id: int = 0,
     global_step: int = 50,
     training_config: str | None = None,
+    is_final: bool = True,
 ) -> tuple[Path, Path]:
     bundle_path = root / "bundle"
     bundle_path.mkdir(parents=True)
@@ -122,7 +123,7 @@ def _write_bundle(
         "algorithm": "dsrl-sac",
         "task_id": task_id,
         "global_step": global_step,
-        "is_final": True,
+        "is_final": is_final,
         "training_config": training_config or f"isaaclab_pi0_dsrl_tacfield_tabero_task{task_id}_firm_8gpu_50step",
         "base_model": str(base_path),
         "base_model_sha256": base_hash,
@@ -308,28 +309,69 @@ def test_bundle_loads_allowlisted_task5_small4gpu40_profile(tmp_path):
     assert bundle.manifest.training_config.endswith("task5_firm_4gpu_40step_small")
 
 
+def test_bundle_loads_allowlisted_task0_selected_step10_profile(tmp_path):
+    bundle_path, base_path = _write_bundle(
+        tmp_path,
+        task_id=0,
+        global_step=10,
+        training_config=("isaaclab_pi0_dsrl_tacfield_tabero_task0_firm_8gpu_50step"),
+        is_final=False,
+    )
+
+    bundle = tabero_dsrl_policy.TaberoDSRLBundle.load(
+        bundle_path,
+        base_checkpoint_dir=base_path,
+    )
+
+    assert bundle.manifest.task_id == 0
+    assert bundle.manifest.global_step == 10
+    assert bundle.manifest.is_final is False
+
+
 @pytest.mark.parametrize(
-    ("task_id", "global_step", "training_config"),
+    ("task_id", "global_step", "training_config", "is_final"),
     [
         (
             0,
             40,
             "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_4gpu_40step_small",
+            True,
         ),
         (
             5,
             40,
             "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_8gpu_50step",
+            True,
         ),
         (
             5,
             50,
             "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_4gpu_40step_small",
+            True,
         ),
         (
             5,
             39,
             "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_4gpu_40step_small",
+            True,
+        ),
+        (
+            5,
+            10,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_8gpu_50step",
+            False,
+        ),
+        (
+            0,
+            10,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task0_firm_8gpu_50step",
+            True,
+        ),
+        (
+            0,
+            20,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task0_firm_8gpu_50step",
+            False,
         ),
     ],
 )
@@ -338,12 +380,14 @@ def test_bundle_rejects_non_allowlisted_training_identity(
     task_id,
     global_step,
     training_config,
+    is_final,
 ):
     bundle_path, base_path = _write_bundle(
         tmp_path,
         task_id=task_id,
         global_step=global_step,
         training_config=training_config,
+        is_final=is_final,
     )
 
     with pytest.raises(ValueError, match="training identity"):

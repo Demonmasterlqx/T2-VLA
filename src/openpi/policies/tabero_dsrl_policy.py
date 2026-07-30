@@ -133,16 +133,25 @@ DSRL_TRAINING_IDENTITIES_V1 = frozenset(
             0,
             50,
             "isaaclab_pi0_dsrl_tacfield_tabero_task0_firm_8gpu_50step",
+            True,
         ),
         (
             5,
             50,
             "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_8gpu_50step",
+            True,
         ),
         (
             5,
             40,
             "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_4gpu_40step_small",
+            True,
+        ),
+        (
+            0,
+            10,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task0_firm_8gpu_50step",
+            False,
         ),
     }
 )
@@ -271,14 +280,21 @@ class TaberoDSRLManifest:
         global_step = values.get("global_step")
         if type(global_step) is not int:
             raise ValueError(f"Tabero DSRL bundle global_step must be an integer; got {global_step!r}.")
-        if values.get("is_final") is not True:
-            raise ValueError("Tabero DSRL bundle is_final must be true.")
-        training_identity = (task_id, global_step, values.get("training_config"))
+        is_final = values.get("is_final")
+        if type(is_final) is not bool:
+            raise ValueError(f"Tabero DSRL bundle is_final must be a boolean; got {is_final!r}.")
+        training_config = values.get("training_config")
+        if not isinstance(training_config, str) or not training_config:
+            raise ValueError("Tabero DSRL bundle training_config must be a non-empty string.")
+        training_identity = (task_id, global_step, training_config, is_final)
         if training_identity not in DSRL_TRAINING_IDENTITIES_V1:
+            final_identity = (task_id, global_step, training_config, True)
+            if is_final is False and final_identity in DSRL_TRAINING_IDENTITIES_V1:
+                raise ValueError("Tabero DSRL bundle is_final must be true for this training identity.")
             raise ValueError(
                 "Tabero DSRL bundle training identity is not allowlisted: "
                 f"task_id={task_id!r}, global_step={global_step!r}, "
-                f"training_config={values.get('training_config')!r}."
+                f"training_config={training_config!r}, is_final={is_final!r}."
             )
         for key, expected in {
             "actor_manifest_version": 1,

@@ -54,7 +54,7 @@ class Args:
     # Optional Tabero RLT bundle exported from RLinf Stage 1/2 checkpoints.
     rlt_bundle: str | None = None
 
-    # Optional final Tabero DSRL-SAC actor bundle exported from RLinf.
+    # Optional audited, allowlisted Tabero DSRL-SAC actor bundle exported from RLinf.
     dsrl_bundle: str | None = None
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.

@@ -175,8 +175,8 @@ def create_trained_policy(
                       If None and is_pytorch=True, will use "cuda" if available, otherwise "cpu".
         rlt_bundle_path: Optional exported Tabero RLT bundle. PyTorch PI0 is used as the
             frozen reference model and its normalized actions are replaced by the RLT actor.
-        dsrl_bundle_path: Optional final Tabero DSRL-SAC actor bundle. The actor consumes
-            raw image/state/tactile observations and supplies deterministic PI0 noise.
+        dsrl_bundle_path: Optional audited, allowlisted Tabero DSRL-SAC actor bundle. The actor
+            consumes raw image/state/tactile observations and supplies deterministic PI0 noise.
 
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the

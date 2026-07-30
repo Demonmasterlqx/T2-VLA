@@ -127,6 +127,26 @@ DSRL_ARTIFACT_AUDIT_CHECKS_V1 = frozenset(
         "output_hashes",
     }
 )
+DSRL_TRAINING_IDENTITIES_V1 = frozenset(
+    {
+        (
+            0,
+            50,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task0_firm_8gpu_50step",
+        ),
+        (
+            5,
+            50,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_8gpu_50step",
+        ),
+        (
+            5,
+            40,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_4gpu_40step_small",
+        ),
+    }
+)
+DSRL_ACTOR_METADATA_KEYS_V1 = frozenset({"format", "format_version", "task_id", "global_step", "dtype"})
 
 
 def _sha256(path: Path) -> str:
@@ -173,6 +193,25 @@ def _parse_json_object(content: bytes, path: Path, label: str) -> dict[str, Any]
     if not isinstance(values, dict):
         raise ValueError(f"Tabero DSRL {label} must be a JSON object.")
     return values
+
+
+def _parse_safetensors_metadata(content: bytes, path: Path) -> dict[str, str]:
+    if len(content) < 8:
+        raise ValueError(f"Tabero DSRL actor weights have an invalid safetensors header: {path}")
+    header_length = int.from_bytes(content[:8], byteorder="little", signed=False)
+    header_end = 8 + header_length
+    if header_length == 0 or header_end > len(content):
+        raise ValueError(f"Tabero DSRL actor weights have an invalid safetensors header: {path}")
+    try:
+        header = json.loads(content[8:header_end])
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"Tabero DSRL actor weights have an invalid safetensors header: {path}") from error
+    metadata = header.get("__metadata__") if isinstance(header, dict) else None
+    if not isinstance(metadata, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in metadata.items()
+    ):
+        raise ValueError("Tabero DSRL actor metadata must be a string mapping.")
+    return metadata
 
 
 def _strict_json_equal(actual: Any, expected: Any) -> bool:
@@ -230,15 +269,16 @@ class TaberoDSRLManifest:
         if type(task_id) is not int or task_id not in {0, 5}:
             raise ValueError(f"Tabero DSRL bundle task_id must be Task 0 or 5; got {task_id!r}.")
         global_step = values.get("global_step")
-        if type(global_step) is not int or global_step != 50:
-            raise ValueError(f"Tabero DSRL bundle global_step must be 50; got {global_step!r}.")
+        if type(global_step) is not int:
+            raise ValueError(f"Tabero DSRL bundle global_step must be an integer; got {global_step!r}.")
         if values.get("is_final") is not True:
             raise ValueError("Tabero DSRL bundle is_final must be true.")
-        expected_training_config = f"isaaclab_pi0_dsrl_tacfield_tabero_task{task_id}_firm_8gpu_50step"
-        if values.get("training_config") != expected_training_config:
+        training_identity = (task_id, global_step, values.get("training_config"))
+        if training_identity not in DSRL_TRAINING_IDENTITIES_V1:
             raise ValueError(
-                "Tabero DSRL bundle training_config mismatch: "
-                f"expected {expected_training_config!r}, got {values.get('training_config')!r}."
+                "Tabero DSRL bundle training identity is not allowlisted: "
+                f"task_id={task_id!r}, global_step={global_step!r}, "
+                f"training_config={values.get('training_config')!r}."
             )
         for key, expected in {
             "actor_manifest_version": 1,
@@ -421,6 +461,25 @@ class TaberoDSRLBundle:
                 "Tabero DSRL actor weights SHA-256 mismatch: "
                 f"expected {manifest.actor_weights_sha256}, got {actual_actor_hash}."
             )
+        actor_metadata = _parse_safetensors_metadata(actor_content, actor_path)
+        expected_actor_metadata = {
+            "format": "tabero_dsrl_t2vla",
+            "format_version": "1",
+            "task_id": str(manifest.task_id),
+            "global_step": str(manifest.global_step),
+            "dtype": "bfloat16",
+        }
+        if set(actor_metadata) != DSRL_ACTOR_METADATA_KEYS_V1:
+            raise ValueError(
+                "Tabero DSRL actor metadata keyspace mismatch; "
+                f"missing={sorted(DSRL_ACTOR_METADATA_KEYS_V1 - set(actor_metadata))}; "
+                f"unexpected={sorted(set(actor_metadata) - DSRL_ACTOR_METADATA_KEYS_V1)}."
+            )
+        for key, expected in expected_actor_metadata.items():
+            if actor_metadata[key] != expected:
+                raise ValueError(
+                    f"Tabero DSRL actor metadata {key} mismatch: expected {expected!r}, got {actor_metadata[key]!r}."
+                )
 
         audit_path = _bundle_filename(root, manifest.artifact_audit, "artifact_audit")
         audit_content, audit_hash = _capture_artifact(audit_path, "artifact audit")

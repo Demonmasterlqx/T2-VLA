@@ -85,14 +85,34 @@ def _zero_actor_state() -> dict[str, torch.Tensor]:
     return {key: torch.zeros(shape, dtype=torch.bfloat16) for key, shape in ACTOR_SHAPES.items()}
 
 
-def _write_bundle(root: Path) -> tuple[Path, Path]:
+def _actor_metadata(task_id: int, global_step: int) -> dict[str, str]:
+    return {
+        "format": "tabero_dsrl_t2vla",
+        "format_version": "1",
+        "task_id": str(task_id),
+        "global_step": str(global_step),
+        "dtype": "bfloat16",
+    }
+
+
+def _write_bundle(
+    root: Path,
+    *,
+    task_id: int = 0,
+    global_step: int = 50,
+    training_config: str | None = None,
+) -> tuple[Path, Path]:
     bundle_path = root / "bundle"
     bundle_path.mkdir(parents=True)
     base_path = root / "base"
     base_path.mkdir()
     (base_path / "model.safetensors").write_bytes(b"base pytorch checkpoint")
     actor_path = bundle_path / "dsrl_actor.safetensors"
-    save_file(_zero_actor_state(), actor_path)
+    save_file(
+        _zero_actor_state(),
+        actor_path,
+        metadata=_actor_metadata(task_id, global_step),
+    )
     actor_hash = _sha256(actor_path)
     base_hash = _sha256(base_path / "model.safetensors")
     source_hash = "1" * 64
@@ -100,13 +120,13 @@ def _write_bundle(root: Path) -> tuple[Path, Path]:
         "format": "tabero_dsrl_t2vla",
         "format_version": 1,
         "algorithm": "dsrl-sac",
-        "task_id": 0,
-        "global_step": 50,
+        "task_id": task_id,
+        "global_step": global_step,
         "is_final": True,
-        "training_config": "isaaclab_pi0_dsrl_tacfield_tabero_task0_firm_8gpu_50step",
+        "training_config": training_config or f"isaaclab_pi0_dsrl_tacfield_tabero_task{task_id}_firm_8gpu_50step",
         "base_model": str(base_path),
         "base_model_sha256": base_hash,
-        "source_checkpoint": "/tmp/global_step_50/actor/model_state_dict/trainable_weights.pt",
+        "source_checkpoint": (f"/tmp/global_step_{global_step}/actor/model_state_dict/trainable_weights.pt"),
         "source_checkpoint_sha256": source_hash,
         "source_provenance": "/tmp/provenance.env",
         "source_provenance_sha256": "2" * 64,
@@ -168,8 +188,8 @@ def _write_bundle(root: Path) -> tuple[Path, Path]:
         "format": "tabero_dsrl_artifact_audit",
         "format_version": 1,
         "status": "passed",
-        "task_id": 0,
-        "global_step": 50,
+        "task_id": task_id,
+        "global_step": global_step,
         "source_checkpoint_sha256": source_hash,
         "base_model_sha256": base_hash,
         "actor_weights_sha256": actor_hash,
@@ -233,10 +253,14 @@ def _replace_actor(bundle_path: Path, state: dict[str, torch.Tensor]) -> None:
     private_copy = bundle_path / ".dsrl_actor.copy"
     shutil.copy2(actor_path, private_copy)
     private_copy.replace(actor_path)
-    save_file(state, actor_path)
-    actor_hash = _sha256(actor_path)
     manifest_path = bundle_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
+    save_file(
+        state,
+        actor_path,
+        metadata=_actor_metadata(manifest["task_id"], manifest["global_step"]),
+    )
+    actor_hash = _sha256(actor_path)
     manifest["actor_weights_sha256"] = actor_hash
     _write_json(manifest_path, manifest)
     audit_path = bundle_path / "artifact_audit.json"
@@ -264,6 +288,95 @@ def test_bundle_loads_exact_final_actor_and_base_checkpoint(bundle_copy):
     actor = bundle.build_actor()
     assert set(actor.state_dict()) == set(ACTOR_SHAPES)
     assert {parameter.dtype for parameter in actor.parameters()} == {torch.bfloat16}
+
+
+def test_bundle_loads_allowlisted_task5_small4gpu40_profile(tmp_path):
+    bundle_path, base_path = _write_bundle(
+        tmp_path,
+        task_id=5,
+        global_step=40,
+        training_config=("isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_4gpu_40step_small"),
+    )
+
+    bundle = tabero_dsrl_policy.TaberoDSRLBundle.load(
+        bundle_path,
+        base_checkpoint_dir=base_path,
+    )
+
+    assert bundle.manifest.task_id == 5
+    assert bundle.manifest.global_step == 40
+    assert bundle.manifest.training_config.endswith("task5_firm_4gpu_40step_small")
+
+
+@pytest.mark.parametrize(
+    ("task_id", "global_step", "training_config"),
+    [
+        (
+            0,
+            40,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_4gpu_40step_small",
+        ),
+        (
+            5,
+            40,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_8gpu_50step",
+        ),
+        (
+            5,
+            50,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_4gpu_40step_small",
+        ),
+        (
+            5,
+            39,
+            "isaaclab_pi0_dsrl_tacfield_tabero_task5_firm_4gpu_40step_small",
+        ),
+    ],
+)
+def test_bundle_rejects_non_allowlisted_training_identity(
+    tmp_path,
+    task_id,
+    global_step,
+    training_config,
+):
+    bundle_path, base_path = _write_bundle(
+        tmp_path,
+        task_id=task_id,
+        global_step=global_step,
+        training_config=training_config,
+    )
+
+    with pytest.raises(ValueError, match="training identity"):
+        tabero_dsrl_policy.TaberoDSRLBundle.load(
+            bundle_path,
+            base_checkpoint_dir=base_path,
+        )
+
+
+def test_bundle_rejects_actor_safetensors_metadata_step_mismatch(bundle_copy):
+    bundle_path, base_path = bundle_copy
+    actor_path = bundle_path / "dsrl_actor.safetensors"
+    state = load_file(actor_path)
+    private_copy = bundle_path / ".dsrl_actor.copy"
+    shutil.copy2(actor_path, private_copy)
+    private_copy.replace(actor_path)
+    save_file(state, actor_path, metadata=_actor_metadata(task_id=0, global_step=40))
+    actor_hash = _sha256(actor_path)
+    manifest_path = bundle_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["actor_weights_sha256"] = actor_hash
+    _write_json(manifest_path, manifest)
+    audit_path = bundle_path / "artifact_audit.json"
+    audit = json.loads(audit_path.read_text())
+    audit["actor_weights_sha256"] = actor_hash
+    audit["manifest_sha256"] = _sha256(manifest_path)
+    _write_json(audit_path, audit)
+
+    with pytest.raises(ValueError, match="actor metadata global_step"):
+        tabero_dsrl_policy.TaberoDSRLBundle.load(
+            bundle_path,
+            base_checkpoint_dir=base_path,
+        )
 
 
 @pytest.mark.parametrize(

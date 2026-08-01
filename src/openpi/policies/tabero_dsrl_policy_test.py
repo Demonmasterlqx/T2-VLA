@@ -22,7 +22,7 @@ from openpi.policies import tabero_dsrl_policy
 import openpi.transforms as transforms
 
 ACTOR_SHAPES = {
-    "dsrl_action_noise_net.shared_net.0.weight": (128, 192),
+    "dsrl_action_noise_net.shared_net.0.weight": (128, 256),
     "dsrl_action_noise_net.shared_net.0.bias": (128,),
     "dsrl_action_noise_net.shared_net.1.weight": (128,),
     "dsrl_action_noise_net.shared_net.1.bias": (128,),
@@ -88,10 +88,12 @@ def _zero_actor_state() -> dict[str, torch.Tensor]:
 def _actor_metadata(task_id: int, global_step: int) -> dict[str, str]:
     return {
         "format": "tabero_dsrl_t2vla",
-        "format_version": "1",
+        "format_version": "2",
         "task_id": str(task_id),
         "global_step": str(global_step),
         "dtype": "bfloat16",
+        "reward_semantics": tabero_dsrl_policy.DSRL_REWARD_SEMANTICS,
+        "observation_semantics": tabero_dsrl_policy.DSRL_OBSERVATION_SEMANTICS,
     }
 
 
@@ -119,8 +121,10 @@ def _write_bundle(
     source_hash = "1" * 64
     manifest = {
         "format": "tabero_dsrl_t2vla",
-        "format_version": 1,
+        "format_version": 2,
         "algorithm": "dsrl-sac",
+        "reward_semantics": tabero_dsrl_policy.DSRL_REWARD_SEMANTICS,
+        "observation_semantics": tabero_dsrl_policy.DSRL_OBSERVATION_SEMANTICS,
         "task_id": task_id,
         "global_step": global_step,
         "is_final": is_final,
@@ -138,13 +142,27 @@ def _write_bundle(
         "source_git_commit": "deadbeef",
         "actor_weights": actor_path.name,
         "actor_weights_sha256": actor_hash,
-        "actor_manifest_version": 1,
+        "actor_manifest_version": 2,
         "actor_tensor_count": 48,
-        "actor_parameter_count": 2_311_648,
+        "actor_parameter_count": 2_319_840,
         "actor_dtype": "bfloat16",
         "observation_contract": {
-            "image": {
+            "main_image": {
                 "key": "dsrl_raw_image",
+                "shape": [256, 256, 3],
+                "layout": "HWC",
+                "dtype": "uint8",
+                "value_range": [0, 255],
+                "preprocessing": {
+                    "resize": [64, 64],
+                    "mode": "bilinear",
+                    "align_corners": False,
+                    "output_layout": "NCHW",
+                    "normalization": "uint8_to_minus_one_one",
+                },
+            },
+            "wrist_image": {
+                "key": "dsrl_raw_wrist_image",
                 "shape": [256, 256, 3],
                 "layout": "HWC",
                 "dtype": "uint8",
@@ -165,7 +183,11 @@ def _write_bundle(
                 "encoder_shape": [9, 396],
             },
         },
-        "feature_contract": {"order": ["state", "image", "tactile"], "dims": [64, 64, 64], "total_dim": 192},
+        "feature_contract": {
+            "order": ["state", "main_image", "wrist_image", "tactile"],
+            "dims": [64, 64, 64, 64],
+            "total_dim": 256,
+        },
         "noise_contract": {
             "dim": 32,
             "horizon": 50,
@@ -175,10 +197,14 @@ def _write_bundle(
         },
         "architecture": {
             "image_size": 64,
+            "image_views": ["main", "wrist"],
+            "shared_image_encoder": True,
+            "per_view_image_dim": 64,
+            "image_feature_dim": 128,
             "state_dim": 7,
             "tactile_shape": [9, 198, 2],
             "hidden_dims": [128, 128, 128],
-            "feature_dim": 192,
+            "feature_dim": 256,
             "noise_dim": 32,
         },
         "artifact_audit": "artifact_audit.json",
@@ -187,10 +213,12 @@ def _write_bundle(
     _write_json(manifest_path, manifest)
     audit = {
         "format": "tabero_dsrl_artifact_audit",
-        "format_version": 1,
+        "format_version": 2,
         "status": "passed",
         "task_id": task_id,
         "global_step": global_step,
+        "reward_semantics": tabero_dsrl_policy.DSRL_REWARD_SEMANTICS,
+        "observation_semantics": tabero_dsrl_policy.DSRL_OBSERVATION_SEMANTICS,
         "source_checkpoint_sha256": source_hash,
         "base_model_sha256": base_hash,
         "actor_weights_sha256": actor_hash,
@@ -204,6 +232,8 @@ def _write_bundle(
             "actor_finite": True,
             "base_model_sha256": True,
             "formal_provenance": True,
+            "reward_semantics": True,
+            "observation_semantics": True,
             "output_hashes": True,
         },
     }
@@ -468,8 +498,13 @@ def test_bundle_rejects_actor_safetensors_metadata_step_mismatch(bundle_copy):
     ("update", "message"),
     [
         ({"format": "other"}, "format"),
-        ({"format_version": 2}, "version"),
+        ({"format_version": 1}, "version"),
         ({"algorithm": "ppo"}, "dsrl-sac"),
+        ({"reward_semantics": "legacy"}, "reward semantics"),
+        (
+            {"observation_semantics": "single_camera_v1"},
+            "observation semantics",
+        ),
         ({"task_id": 1}, "Task 0 or 5"),
         ({"global_step": 49}, "global_step.*50"),
         ({"is_final": False}, "is_final.*true"),
@@ -488,7 +523,7 @@ def test_bundle_rejects_wrong_final_training_identity(bundle_copy, update, messa
     [
         (("actor_manifest_version",), True),
         (("actor_tensor_count",), 48.0),
-        (("observation_contract", "image", "value_range", 0), False),
+        (("observation_contract", "main_image", "value_range", 0), False),
         (("architecture", "image_size"), 64.0),
     ],
 )
@@ -676,7 +711,7 @@ def test_bundle_requires_passed_matching_artifact_audit(bundle_copy):
         "source_git_commit",
     ],
 )
-def test_bundle_requires_complete_exporter_v1_provenance_manifest(bundle_copy, field):
+def test_bundle_requires_complete_exporter_v2_provenance_manifest(bundle_copy, field):
     bundle_path, base_path = bundle_copy
     _remove_manifest_field(bundle_path, field)
 
@@ -687,7 +722,7 @@ def test_bundle_requires_complete_exporter_v1_provenance_manifest(bundle_copy, f
 @pytest.mark.parametrize(
     ("update", "message"),
     [
-        ({"format_version": True}, "format_version.*integer 1"),
+        ({"format_version": True}, "format_version.*integer 2"),
         ({"checks": {"made_up_check": True}}, "audit checks keyspace mismatch"),
     ],
 )
@@ -751,9 +786,11 @@ def test_bundle_rejects_noncanonical_actor_state(bundle_copy, corruption):
 
 
 def _raw_observation() -> dict[str, np.ndarray]:
-    image = np.arange(256 * 256 * 3, dtype=np.uint8).reshape(256, 256, 3)
+    main_image = np.arange(256 * 256 * 3, dtype=np.uint8).reshape(256, 256, 3)
+    wrist_image = np.flip(main_image, axis=1).copy()
     return {
-        "dsrl_raw_image": image,
+        "dsrl_raw_image": main_image,
+        "dsrl_raw_wrist_image": wrist_image,
         "state": np.linspace(-1.0, 1.0, 7, dtype=np.float32),
         "tactile_marker_motion": np.zeros((9, 198, 2), dtype=np.float32),
     }
@@ -765,15 +802,19 @@ def test_actor_preprocess_matches_rlinf_image_state_and_tactile_contract():
 
     images, states, tactile = actor.preprocess(observation)
 
-    source = torch.from_numpy(observation["dsrl_raw_image"]).float() / 255.0
-    expected_images = torch.nn.functional.interpolate(
-        source.permute(2, 0, 1).unsqueeze(0),
-        size=(64, 64),
-        mode="bilinear",
-        align_corners=False,
-    )
-    expected_images = (expected_images * 2.0 - 1.0).unsqueeze(1).to(torch.bfloat16)
+    expected_views = []
+    for key in ("dsrl_raw_image", "dsrl_raw_wrist_image"):
+        source = torch.from_numpy(observation[key]).float() / 255.0
+        expected_view = torch.nn.functional.interpolate(
+            source.permute(2, 0, 1).unsqueeze(0),
+            size=(64, 64),
+            mode="bilinear",
+            align_corners=False,
+        )
+        expected_views.append(expected_view * 2.0 - 1.0)
+    expected_images = torch.stack(expected_views, dim=1).to(torch.bfloat16)
     torch.testing.assert_close(images, expected_images)
+    assert images.shape == (1, 2, 3, 64, 64)
     torch.testing.assert_close(states, torch.from_numpy(observation["state"])[None].to(torch.bfloat16))
     assert tactile.shape == (1, 9, 396)
     assert tactile.dtype == torch.bfloat16
@@ -783,8 +824,11 @@ def test_actor_preprocess_matches_rlinf_image_state_and_tactile_contract():
     ("mutation", "message"),
     [
         (lambda obs: obs.pop("tactile_marker_motion"), "tactile_marker_motion"),
+        (lambda obs: obs.pop("dsrl_raw_wrist_image"), "dsrl_raw_wrist_image"),
         (lambda obs: obs.__setitem__("dsrl_raw_image", np.zeros((255, 256, 3), dtype=np.uint8)), "256, 256, 3"),
         (lambda obs: obs.__setitem__("dsrl_raw_image", np.zeros((256, 256, 3), dtype=np.float32)), "uint8"),
+        (lambda obs: obs.__setitem__("dsrl_raw_wrist_image", np.zeros((256, 255, 3), dtype=np.uint8)), "256, 256, 3"),
+        (lambda obs: obs.__setitem__("dsrl_raw_wrist_image", np.zeros((256, 256, 3), dtype=np.float32)), "uint8"),
         (lambda obs: obs.__setitem__("state", np.zeros(8, dtype=np.float32)), "shape.*7"),
         (lambda obs: obs.__setitem__("state", np.zeros(7, dtype=np.float64)), "state.*float32"),
         (
@@ -828,7 +872,7 @@ def test_actor_tactile_encoder_is_two_layer_causal_tcn():
     torch.testing.assert_close(encoded[0, 1:], torch.zeros(63, dtype=torch.bfloat16))
 
 
-def test_actor_feature_order_is_state_image_tactile(monkeypatch):
+def test_actor_feature_order_is_state_main_wrist_tactile(monkeypatch):
     actor = tabero_dsrl_policy.TaberoDSRLActor()
     monkeypatch.setattr(
         actor.actor_state_encoder,
@@ -838,7 +882,13 @@ def test_actor_feature_order_is_state_image_tactile(monkeypatch):
     monkeypatch.setattr(
         actor.actor_image_encoder,
         "forward",
-        lambda value: torch.full((value.shape[0], 64), 2, dtype=torch.bfloat16),
+        lambda value: torch.cat(
+            (
+                torch.full((value.shape[0], 64), 2, dtype=torch.bfloat16),
+                torch.full((value.shape[0], 64), 4, dtype=torch.bfloat16),
+            ),
+            dim=-1,
+        ),
     )
     monkeypatch.setattr(
         actor.actor_tactile_encoder,
@@ -850,7 +900,8 @@ def test_actor_feature_order_is_state_image_tactile(monkeypatch):
 
     torch.testing.assert_close(features[:, :64], torch.ones(1, 64, dtype=torch.bfloat16))
     torch.testing.assert_close(features[:, 64:128], torch.full((1, 64), 2, dtype=torch.bfloat16))
-    torch.testing.assert_close(features[:, 128:], torch.full((1, 64), 3, dtype=torch.bfloat16))
+    torch.testing.assert_close(features[:, 128:192], torch.full((1, 64), 4, dtype=torch.bfloat16))
+    torch.testing.assert_close(features[:, 192:], torch.full((1, 64), 3, dtype=torch.bfloat16))
 
 
 def test_actor_deployment_noise_is_bf16_tanh_mean_broadcast_across_horizon(monkeypatch):

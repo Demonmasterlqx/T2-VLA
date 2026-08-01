@@ -15,9 +15,12 @@ import torch
 from torch import nn
 import torch.nn.functional as F  # noqa: N812
 
-DSRL_ACTOR_MANIFEST_V1: Mapping[str, tuple[int, ...]] = MappingProxyType(
+DSRL_REWARD_SEMANTICS = "discounted_alive_masked_v1"
+DSRL_OBSERVATION_SEMANTICS = "main_wrist_shared_encoder_concat_v1"
+
+DSRL_ACTOR_MANIFEST_V2: Mapping[str, tuple[int, ...]] = MappingProxyType(
     {
-        "dsrl_action_noise_net.shared_net.0.weight": (128, 192),
+        "dsrl_action_noise_net.shared_net.0.weight": (128, 256),
         "dsrl_action_noise_net.shared_net.0.bias": (128,),
         "dsrl_action_noise_net.shared_net.1.weight": (128,),
         "dsrl_action_noise_net.shared_net.1.bias": (128,),
@@ -67,11 +70,13 @@ DSRL_ACTOR_MANIFEST_V1: Mapping[str, tuple[int, ...]] = MappingProxyType(
         "actor_tactile_encoder.out_proj.bias": (64,),
     }
 )
-DSRL_BUNDLE_MANIFEST_KEYS_V1 = frozenset(
+DSRL_BUNDLE_MANIFEST_KEYS_V2 = frozenset(
     {
         "format",
         "format_version",
         "algorithm",
+        "reward_semantics",
+        "observation_semantics",
         "task_id",
         "global_step",
         "is_final",
@@ -100,13 +105,15 @@ DSRL_BUNDLE_MANIFEST_KEYS_V1 = frozenset(
         "artifact_audit",
     }
 )
-DSRL_ARTIFACT_AUDIT_KEYS_V1 = frozenset(
+DSRL_ARTIFACT_AUDIT_KEYS_V2 = frozenset(
     {
         "format",
         "format_version",
         "status",
         "task_id",
         "global_step",
+        "reward_semantics",
+        "observation_semantics",
         "source_checkpoint_sha256",
         "base_model_sha256",
         "actor_weights_sha256",
@@ -114,7 +121,7 @@ DSRL_ARTIFACT_AUDIT_KEYS_V1 = frozenset(
         "checks",
     }
 )
-DSRL_ARTIFACT_AUDIT_CHECKS_V1 = frozenset(
+DSRL_ARTIFACT_AUDIT_CHECKS_V2 = frozenset(
     {
         "final_checkpoint_path",
         "source_metadata",
@@ -124,10 +131,12 @@ DSRL_ARTIFACT_AUDIT_CHECKS_V1 = frozenset(
         "actor_finite",
         "base_model_sha256",
         "formal_provenance",
+        "reward_semantics",
+        "observation_semantics",
         "output_hashes",
     }
 )
-DSRL_TRAINING_IDENTITIES_V1 = frozenset(
+DSRL_TRAINING_IDENTITIES_V2 = frozenset(
     {
         (
             0,
@@ -191,7 +200,17 @@ DSRL_TRAINING_IDENTITIES_V1 = frozenset(
         ),
     }
 )
-DSRL_ACTOR_METADATA_KEYS_V1 = frozenset({"format", "format_version", "task_id", "global_step", "dtype"})
+DSRL_ACTOR_METADATA_KEYS_V2 = frozenset(
+    {
+        "format",
+        "format_version",
+        "task_id",
+        "global_step",
+        "dtype",
+        "reward_semantics",
+        "observation_semantics",
+    }
+)
 
 
 def _sha256(path: Path) -> str:
@@ -276,7 +295,7 @@ def _strict_json_equal(actual: Any, expected: Any) -> bool:
 
 def _require_exact_contract(values: Mapping[str, Any], key: str, expected: Any) -> None:
     if not _strict_json_equal(values.get(key), expected):
-        raise ValueError(f"Tabero DSRL manifest {key} does not match the version-1 inference contract.")
+        raise ValueError(f"Tabero DSRL manifest {key} does not match the version-2 inference contract.")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -298,18 +317,30 @@ class TaberoDSRLManifest:
     @classmethod
     def from_dict(cls, values: dict[str, Any]) -> TaberoDSRLManifest:
         actual_keys = set(values)
-        if actual_keys != DSRL_BUNDLE_MANIFEST_KEYS_V1:
+        if actual_keys != DSRL_BUNDLE_MANIFEST_KEYS_V2:
             raise ValueError(
                 "Tabero DSRL manifest keyspace mismatch; "
-                f"missing={sorted(DSRL_BUNDLE_MANIFEST_KEYS_V1 - actual_keys)}; "
-                f"unexpected={sorted(actual_keys - DSRL_BUNDLE_MANIFEST_KEYS_V1)}."
+                f"missing={sorted(DSRL_BUNDLE_MANIFEST_KEYS_V2 - actual_keys)}; "
+                f"unexpected={sorted(actual_keys - DSRL_BUNDLE_MANIFEST_KEYS_V2)}."
             )
         if values.get("format") != "tabero_dsrl_t2vla":
             raise ValueError(f"Unsupported Tabero DSRL bundle format: {values.get('format')!r}.")
-        if type(values.get("format_version")) is not int or values["format_version"] != 1:
+        if type(values.get("format_version")) is not int or values["format_version"] != 2:
             raise ValueError(f"Unsupported Tabero DSRL bundle version: {values.get('format_version')!r}.")
         if values.get("algorithm") != "dsrl-sac":
             raise ValueError("Tabero DSRL bundle algorithm must be 'dsrl-sac'.")
+        if values.get("reward_semantics") != DSRL_REWARD_SEMANTICS:
+            raise ValueError(
+                "Tabero DSRL bundle reward semantics mismatch: "
+                f"expected {DSRL_REWARD_SEMANTICS!r}, got "
+                f"{values.get('reward_semantics')!r}."
+            )
+        if values.get("observation_semantics") != DSRL_OBSERVATION_SEMANTICS:
+            raise ValueError(
+                "Tabero DSRL bundle observation semantics mismatch: "
+                f"expected {DSRL_OBSERVATION_SEMANTICS!r}, got "
+                f"{values.get('observation_semantics')!r}."
+            )
         task_id = values.get("task_id")
         if type(task_id) is not int or task_id not in {0, 5}:
             raise ValueError(f"Tabero DSRL bundle task_id must be Task 0 or 5; got {task_id!r}.")
@@ -323,9 +354,9 @@ class TaberoDSRLManifest:
         if not isinstance(training_config, str) or not training_config:
             raise ValueError("Tabero DSRL bundle training_config must be a non-empty string.")
         training_identity = (task_id, global_step, training_config, is_final)
-        if training_identity not in DSRL_TRAINING_IDENTITIES_V1:
+        if training_identity not in DSRL_TRAINING_IDENTITIES_V2:
             final_identity = (task_id, global_step, training_config, True)
-            if is_final is False and final_identity in DSRL_TRAINING_IDENTITIES_V1:
+            if is_final is False and final_identity in DSRL_TRAINING_IDENTITIES_V2:
                 raise ValueError("Tabero DSRL bundle is_final must be true for this training identity.")
             raise ValueError(
                 "Tabero DSRL bundle training identity is not allowlisted: "
@@ -333,13 +364,27 @@ class TaberoDSRLManifest:
                 f"training_config={training_config!r}, is_final={is_final!r}."
             )
         for key, expected in {
-            "actor_manifest_version": 1,
+            "actor_manifest_version": 2,
             "actor_tensor_count": 48,
-            "actor_parameter_count": 2_311_648,
+            "actor_parameter_count": 2_319_840,
             "actor_dtype": "bfloat16",
             "observation_contract": {
-                "image": {
+                "main_image": {
                     "key": "dsrl_raw_image",
+                    "shape": [256, 256, 3],
+                    "layout": "HWC",
+                    "dtype": "uint8",
+                    "value_range": [0, 255],
+                    "preprocessing": {
+                        "resize": [64, 64],
+                        "mode": "bilinear",
+                        "align_corners": False,
+                        "output_layout": "NCHW",
+                        "normalization": "uint8_to_minus_one_one",
+                    },
+                },
+                "wrist_image": {
+                    "key": "dsrl_raw_wrist_image",
                     "shape": [256, 256, 3],
                     "layout": "HWC",
                     "dtype": "uint8",
@@ -361,9 +406,9 @@ class TaberoDSRLManifest:
                 },
             },
             "feature_contract": {
-                "order": ["state", "image", "tactile"],
-                "dims": [64, 64, 64],
-                "total_dim": 192,
+                "order": ["state", "main_image", "wrist_image", "tactile"],
+                "dims": [64, 64, 64, 64],
+                "total_dim": 256,
             },
             "noise_contract": {
                 "dim": 32,
@@ -374,10 +419,14 @@ class TaberoDSRLManifest:
             },
             "architecture": {
                 "image_size": 64,
+                "image_views": ["main", "wrist"],
+                "shared_image_encoder": True,
+                "per_view_image_dim": 64,
+                "image_feature_dim": 128,
                 "state_dim": 7,
                 "tactile_shape": [9, 198, 2],
                 "hidden_dims": [128, 128, 128],
-                "feature_dim": 192,
+                "feature_dim": 256,
                 "noise_dim": 32,
             },
         }.items():
@@ -437,14 +486,14 @@ def _bundle_filename(root: Path, filename: str, label: str) -> Path:
 
 
 def _validate_actor_state(state: Mapping[str, torch.Tensor]) -> None:
-    expected_keys = set(DSRL_ACTOR_MANIFEST_V1)
+    expected_keys = set(DSRL_ACTOR_MANIFEST_V2)
     actual_keys = set(state)
     missing = sorted(expected_keys - actual_keys)
     unexpected = sorted(actual_keys - expected_keys)
     shapes = {
-        key: {"expected": DSRL_ACTOR_MANIFEST_V1[key], "actual": tuple(state[key].shape)}
+        key: {"expected": DSRL_ACTOR_MANIFEST_V2[key], "actual": tuple(state[key].shape)}
         for key in expected_keys & actual_keys
-        if tuple(state[key].shape) != DSRL_ACTOR_MANIFEST_V1[key]
+        if tuple(state[key].shape) != DSRL_ACTOR_MANIFEST_V2[key]
     }
     if missing or unexpected or shapes:
         raise ValueError(
@@ -516,16 +565,18 @@ class TaberoDSRLBundle:
         actor_metadata = _parse_safetensors_metadata(actor_content, actor_path)
         expected_actor_metadata = {
             "format": "tabero_dsrl_t2vla",
-            "format_version": "1",
+            "format_version": "2",
             "task_id": str(manifest.task_id),
             "global_step": str(manifest.global_step),
             "dtype": "bfloat16",
+            "reward_semantics": DSRL_REWARD_SEMANTICS,
+            "observation_semantics": DSRL_OBSERVATION_SEMANTICS,
         }
-        if set(actor_metadata) != DSRL_ACTOR_METADATA_KEYS_V1:
+        if set(actor_metadata) != DSRL_ACTOR_METADATA_KEYS_V2:
             raise ValueError(
                 "Tabero DSRL actor metadata keyspace mismatch; "
-                f"missing={sorted(DSRL_ACTOR_METADATA_KEYS_V1 - set(actor_metadata))}; "
-                f"unexpected={sorted(set(actor_metadata) - DSRL_ACTOR_METADATA_KEYS_V1)}."
+                f"missing={sorted(DSRL_ACTOR_METADATA_KEYS_V2 - set(actor_metadata))}; "
+                f"unexpected={sorted(set(actor_metadata) - DSRL_ACTOR_METADATA_KEYS_V2)}."
             )
         for key, expected in expected_actor_metadata.items():
             if actor_metadata[key] != expected:
@@ -537,16 +588,16 @@ class TaberoDSRLBundle:
         audit_content, audit_hash = _capture_artifact(audit_path, "artifact audit")
         audit = _parse_json_object(audit_content, audit_path, "artifact audit")
         actual_audit_keys = set(audit)
-        if actual_audit_keys != DSRL_ARTIFACT_AUDIT_KEYS_V1:
+        if actual_audit_keys != DSRL_ARTIFACT_AUDIT_KEYS_V2:
             raise ValueError(
                 "Tabero DSRL artifact audit keyspace mismatch; "
-                f"missing={sorted(DSRL_ARTIFACT_AUDIT_KEYS_V1 - actual_audit_keys)}; "
-                f"unexpected={sorted(actual_audit_keys - DSRL_ARTIFACT_AUDIT_KEYS_V1)}."
+                f"missing={sorted(DSRL_ARTIFACT_AUDIT_KEYS_V2 - actual_audit_keys)}; "
+                f"unexpected={sorted(actual_audit_keys - DSRL_ARTIFACT_AUDIT_KEYS_V2)}."
             )
         if audit.get("format") != "tabero_dsrl_artifact_audit":
             raise ValueError("Tabero DSRL artifact audit format is unsupported.")
-        if type(audit.get("format_version")) is not int or audit["format_version"] != 1:
-            raise ValueError("Tabero DSRL artifact audit format_version must be integer 1.")
+        if type(audit.get("format_version")) is not int or audit["format_version"] != 2:
+            raise ValueError("Tabero DSRL artifact audit format_version must be integer 2.")
         if audit.get("status") != "passed":
             raise ValueError(f"Tabero DSRL artifact audit status must be passed; got {audit.get('status')!r}.")
         for key in ("task_id", "global_step"):
@@ -555,6 +606,8 @@ class TaberoDSRLBundle:
         audit_matches = {
             "task_id": manifest.task_id,
             "global_step": manifest.global_step,
+            "reward_semantics": DSRL_REWARD_SEMANTICS,
+            "observation_semantics": DSRL_OBSERVATION_SEMANTICS,
             "source_checkpoint_sha256": manifest.source_checkpoint_sha256,
             "base_model_sha256": manifest.base_model_sha256,
             "actor_weights_sha256": manifest.actor_weights_sha256,
@@ -566,12 +619,12 @@ class TaberoDSRLBundle:
                     f"Tabero DSRL artifact audit {key} mismatch: expected {expected!r}, got {audit.get(key)!r}."
                 )
         checks = audit.get("checks")
-        if not isinstance(checks, dict) or set(checks) != DSRL_ARTIFACT_AUDIT_CHECKS_V1:
+        if not isinstance(checks, dict) or set(checks) != DSRL_ARTIFACT_AUDIT_CHECKS_V2:
             actual_check_keys = set(checks) if isinstance(checks, dict) else set()
             raise ValueError(
                 "Tabero DSRL artifact audit checks keyspace mismatch; "
-                f"missing={sorted(DSRL_ARTIFACT_AUDIT_CHECKS_V1 - actual_check_keys)}; "
-                f"unexpected={sorted(actual_check_keys - DSRL_ARTIFACT_AUDIT_CHECKS_V1)}."
+                f"missing={sorted(DSRL_ARTIFACT_AUDIT_CHECKS_V2 - actual_check_keys)}; "
+                f"unexpected={sorted(actual_check_keys - DSRL_ARTIFACT_AUDIT_CHECKS_V2)}."
             )
         if any(value is not True for value in checks.values()):
             raise ValueError("Tabero DSRL artifact audit checks must all be true.")
@@ -599,7 +652,7 @@ class _GaussianPolicy(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.shared_net = nn.Sequential(
-            nn.Linear(192, 128),
+            nn.Linear(256, 128),
             nn.LayerNorm(128),
             nn.ReLU(),
             nn.Linear(128, 128),
@@ -634,8 +687,12 @@ class _ImageEncoder(nn.Module):
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         batch_size, num_images, channels, height, width = images.shape
-        encoded = self.encoder(images.reshape(batch_size, num_images * channels, height, width))
-        return self.bottleneck(encoded)
+        if num_images != 2:
+            raise ValueError(f"Tabero DSRL actor expected two ordered image views; got {num_images}.")
+        view_batch = images.reshape(batch_size * num_images, channels, height, width)
+        encoded = self.encoder(view_batch)
+        per_view = self.bottleneck(encoded)
+        return per_view.reshape(batch_size, num_images, -1).reshape(batch_size, -1)
 
 
 class _StateEncoder(nn.Module):
@@ -713,16 +770,24 @@ class TaberoDSRLActor(nn.Module):
         self,
         observation: Mapping[str, Any],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        required = ("dsrl_raw_image", "state", "tactile_marker_motion")
+        required = (
+            "dsrl_raw_image",
+            "dsrl_raw_wrist_image",
+            "state",
+            "tactile_marker_motion",
+        )
         missing = [key for key in required if key not in observation]
         if missing:
             raise KeyError(f"Tabero DSRL raw observation is missing required keys: {missing}.")
 
-        image = torch.as_tensor(observation["dsrl_raw_image"])
-        if tuple(image.shape) != (256, 256, 3):
-            raise ValueError(f"Tabero DSRL dsrl_raw_image expected HWC shape (256, 256, 3); got {tuple(image.shape)}.")
-        if image.dtype != torch.uint8:
-            raise ValueError(f"Tabero DSRL dsrl_raw_image must use uint8; got {image.dtype}.")
+        raw_images = []
+        for key in ("dsrl_raw_image", "dsrl_raw_wrist_image"):
+            image = torch.as_tensor(observation[key])
+            if tuple(image.shape) != (256, 256, 3):
+                raise ValueError(f"Tabero DSRL {key} expected HWC shape (256, 256, 3); got {tuple(image.shape)}.")
+            if image.dtype != torch.uint8:
+                raise ValueError(f"Tabero DSRL {key} must use uint8; got {image.dtype}.")
+            raw_images.append(image)
 
         state = torch.as_tensor(observation["state"])
         if tuple(state.shape) != (7,):
@@ -738,13 +803,16 @@ class TaberoDSRLActor(nn.Module):
         if tactile.dtype != torch.float32:
             raise ValueError(f"Tabero DSRL tactile_marker_motion must use float32; got {tactile.dtype}.")
 
-        image = image.to(device=self.device, dtype=torch.float32)
-        image = image.permute(2, 0, 1).unsqueeze(0) / 255.0
-        image = F.interpolate(image, size=(64, 64), mode="bilinear", align_corners=False)
-        image = (image * 2.0 - 1.0).unsqueeze(1).to(dtype=torch.bfloat16)
+        image_views = []
+        for raw_image in raw_images:
+            image_view = raw_image.to(device=self.device, dtype=torch.float32)
+            image_view = image_view.permute(2, 0, 1).unsqueeze(0) / 255.0
+            image_view = F.interpolate(image_view, size=(64, 64), mode="bilinear", align_corners=False)
+            image_views.append(image_view * 2.0 - 1.0)
+        images = torch.stack(image_views, dim=1).to(dtype=torch.bfloat16)
         state = state.to(device=self.device, dtype=torch.bfloat16).unsqueeze(0)
         tactile = tactile.to(device=self.device, dtype=torch.bfloat16).reshape(1, 9, 396)
-        return image, state, tactile
+        return images, state, tactile
 
     @torch.no_grad()
     def features(self, observation: Mapping[str, Any]) -> torch.Tensor:

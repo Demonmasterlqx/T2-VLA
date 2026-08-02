@@ -17,6 +17,7 @@ import torch.nn.functional as F  # noqa: N812
 
 DSRL_REWARD_SEMANTICS = "discounted_alive_masked_v1"
 DSRL_OBSERVATION_SEMANTICS = "main_wrist_shared_encoder_concat_v1"
+DSRL_TRANSITION_BOUNDARY_SEMANTICS = "terminal_observation_first_done_hdf5_reset_v1"
 
 DSRL_ACTOR_MANIFEST_V2: Mapping[str, tuple[int, ...]] = MappingProxyType(
     {
@@ -77,6 +78,7 @@ DSRL_BUNDLE_MANIFEST_KEYS_V2 = frozenset(
         "algorithm",
         "reward_semantics",
         "observation_semantics",
+        "transition_boundary_semantics",
         "task_id",
         "global_step",
         "is_final",
@@ -114,6 +116,7 @@ DSRL_ARTIFACT_AUDIT_KEYS_V2 = frozenset(
         "global_step",
         "reward_semantics",
         "observation_semantics",
+        "transition_boundary_semantics",
         "source_checkpoint_sha256",
         "base_model_sha256",
         "actor_weights_sha256",
@@ -133,6 +136,7 @@ DSRL_ARTIFACT_AUDIT_CHECKS_V2 = frozenset(
         "formal_provenance",
         "reward_semantics",
         "observation_semantics",
+        "transition_boundary_semantics",
         "output_hashes",
     }
 )
@@ -209,6 +213,7 @@ DSRL_ACTOR_METADATA_KEYS_V2 = frozenset(
         "dtype",
         "reward_semantics",
         "observation_semantics",
+        "transition_boundary_semantics",
     }
 )
 
@@ -340,6 +345,12 @@ class TaberoDSRLManifest:
                 "Tabero DSRL bundle observation semantics mismatch: "
                 f"expected {DSRL_OBSERVATION_SEMANTICS!r}, got "
                 f"{values.get('observation_semantics')!r}."
+            )
+        if values.get("transition_boundary_semantics") != DSRL_TRANSITION_BOUNDARY_SEMANTICS:
+            raise ValueError(
+                "Tabero DSRL bundle transition boundary semantics mismatch: "
+                f"expected {DSRL_TRANSITION_BOUNDARY_SEMANTICS!r}, got "
+                f"{values.get('transition_boundary_semantics')!r}."
             )
         task_id = values.get("task_id")
         if type(task_id) is not int or task_id not in {0, 5}:
@@ -571,6 +582,7 @@ class TaberoDSRLBundle:
             "dtype": "bfloat16",
             "reward_semantics": DSRL_REWARD_SEMANTICS,
             "observation_semantics": DSRL_OBSERVATION_SEMANTICS,
+            "transition_boundary_semantics": (DSRL_TRANSITION_BOUNDARY_SEMANTICS),
         }
         if set(actor_metadata) != DSRL_ACTOR_METADATA_KEYS_V2:
             raise ValueError(
@@ -608,6 +620,7 @@ class TaberoDSRLBundle:
             "global_step": manifest.global_step,
             "reward_semantics": DSRL_REWARD_SEMANTICS,
             "observation_semantics": DSRL_OBSERVATION_SEMANTICS,
+            "transition_boundary_semantics": (DSRL_TRANSITION_BOUNDARY_SEMANTICS),
             "source_checkpoint_sha256": manifest.source_checkpoint_sha256,
             "base_model_sha256": manifest.base_model_sha256,
             "actor_weights_sha256": manifest.actor_weights_sha256,

@@ -94,6 +94,7 @@ def _actor_metadata(task_id: int, global_step: int) -> dict[str, str]:
         "dtype": "bfloat16",
         "reward_semantics": tabero_dsrl_policy.DSRL_REWARD_SEMANTICS,
         "observation_semantics": tabero_dsrl_policy.DSRL_OBSERVATION_SEMANTICS,
+        "transition_boundary_semantics": (tabero_dsrl_policy.DSRL_TRANSITION_BOUNDARY_SEMANTICS),
     }
 
 
@@ -125,6 +126,7 @@ def _write_bundle(
         "algorithm": "dsrl-sac",
         "reward_semantics": tabero_dsrl_policy.DSRL_REWARD_SEMANTICS,
         "observation_semantics": tabero_dsrl_policy.DSRL_OBSERVATION_SEMANTICS,
+        "transition_boundary_semantics": (tabero_dsrl_policy.DSRL_TRANSITION_BOUNDARY_SEMANTICS),
         "task_id": task_id,
         "global_step": global_step,
         "is_final": is_final,
@@ -219,6 +221,7 @@ def _write_bundle(
         "global_step": global_step,
         "reward_semantics": tabero_dsrl_policy.DSRL_REWARD_SEMANTICS,
         "observation_semantics": tabero_dsrl_policy.DSRL_OBSERVATION_SEMANTICS,
+        "transition_boundary_semantics": (tabero_dsrl_policy.DSRL_TRANSITION_BOUNDARY_SEMANTICS),
         "source_checkpoint_sha256": source_hash,
         "base_model_sha256": base_hash,
         "actor_weights_sha256": actor_hash,
@@ -234,6 +237,7 @@ def _write_bundle(
             "formal_provenance": True,
             "reward_semantics": True,
             "observation_semantics": True,
+            "transition_boundary_semantics": True,
             "output_hashes": True,
         },
     }
@@ -504,6 +508,10 @@ def test_bundle_rejects_actor_safetensors_metadata_step_mismatch(bundle_copy):
         (
             {"observation_semantics": "single_camera_v1"},
             "observation semantics",
+        ),
+        (
+            {"transition_boundary_semantics": "cross_episode_chunk_v0"},
+            "transition boundary semantics",
         ),
         ({"task_id": 1}, "Task 0 or 5"),
         ({"global_step": 49}, "global_step.*50"),
